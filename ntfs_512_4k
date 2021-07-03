@@ -1,0 +1,402 @@
+#!/usr/bin/perl
+
+# This script modified NTFS (NT 4.0 and newer) after cloning from 512-byte sector disk to 4k-sector disk.
+# Format of NTFS boot sector from http://ntfs.com/ntfs-partition-boot-sector.htm
+# https://thestarman.pcministry.com/asm/mbr/NTFSBR.htm
+
+use Data::Dumper;
+$Data::Dumper::Sortkeys = 1;
+
+# For rel file path to abs path
+use File::Spec;
+
+# For seeking
+#use Fcntl;
+
+use Getopt::Long qw(GetOptions);
+
+my $sUsage = <<KROK;
+
+Usage:
+
+Show information from bootsectors
+  $0 show NTFS_partition 
+  
+Fix NTFS boot sectors
+  $0 fix  NTFS_partition 
+  
+Get help
+  $0 --help
+  
+Examples:
+  $0 show /dev/sda1  
+  $0 fix /dev/nvme0n1p6
+KROK
+
+sub print_usage
+{
+  print $sUsage."\n";
+}
+
+sub no_args
+{
+  print_usage();
+  exit 7;
+}
+ 
+my %option;
+my @aCp;
+my $sDevice = my $sMount = "";
+
+my @aRec = (
+    ["Bytes Per Sector   %10d\n", 0x0B, 2, 'S'],  #0
+    ["Sector Per Cluster %10d\n", 0x0D, 1, 'C'],  #1
+#    ["Reserved Sectors   %10d\n", 0x0E, 2, 'S'], 
+    ["Sectors Per Track  %10d\n", 0x18, 2, 'S'],  #2
+    ["Number Of Heads    %10d\n", 0x1A, 2, 'S'],  #3
+    ["Hidden Sectors     %10d\n", 0x1C, 4, 'L'],  #4
+    ["Total Sectors      %10d\n", 0x28, 8, 'q']   #5
+#    ["Starting cluster   %10d\n", 0x30, 8, 'q'],
+#    ["Checksum           %10d\n", 0x50, 4, 'L']
+);
+
+GetOptions(
+    \%option,
+    'help|h'
+) or no_args();
+
+if ($option{'help'})
+{
+  print "This script correct NTFS filesystem boot sectors after migration from 512 sector to 4K (4096 bytes) sector.\n\n";
+  print_usage();
+  print "NOTE: You need root privilegies and installed nilfs2 utilities.\n\n";
+  print "*** If you need additional features, you can contact me and sponsor them. PayPal: ntfs21\@kamenev.ru ***\n";
+  exit 0;
+}
+
+$sCommand = $ARGV[0];
+
+if (($sCommand ne 'show') && ($sCommand ne 'fix') && ($sCommand ne 'unfix'))
+{
+  print "Error: unknown command: $sCommand!\n";
+  print_usage();
+  exit 12;
+}
+
+$sPartition = File::Spec->rel2abs( $ARGV[1] );
+
+if (!$sPartition)
+{
+  print "Error: no partition!\n";
+  print_usage();
+  exit 13;
+}
+
+if ($> != 0)
+{
+  print "Error: You need root privelegies!\n";
+  exit 8;
+}
+
+if (!$sCommand)
+{
+  print "Error: no command given!\n";
+  print_usage();
+  exit 11;
+}
+
+if ($sCommand eq 'show')
+{
+  command_show($sPartition);
+}
+elsif ($sCommand eq 'fix')
+{
+  command_fix($sPartition);
+}
+elsif ($sCommand eq 'unfix')
+{
+  command_unfix($sPartition);
+}
+else
+{
+  print "Error: unknown command!\n";
+  print_usage();
+  exit 14;
+}
+
+exit 0;
+
+#  This procedure for loading values
+sub getField
+{  
+  my ($fh, $nBase, $nOffset, $nSize, $sFormat) = @_;
+  
+  #print Dumper(@_);
+  
+  
+  my $sBuffer = '';
+  
+  seek($fh, $nBase + $nOffset, 0) or die "Seeking: $!";
+  read($fh, $sBuffer, $nSize) == $nSize  or die "Reading: $!";
+  @FIELDS = unpack($sFormat, $sBuffer);
+  
+  #print Dumper(@FIELDS);
+  #exit 0;
+  
+  
+  return @FIELDS;
+}
+
+sub command_show
+{
+  my $sPartition = shift;
+  my $fh;
+  my $nBase = 0;
+  
+  if (!open($fh, '<', $sPartition))
+  { 
+    print "Could not open partition '$sPartition' $!\n";
+    exit 15;
+  }
+  
+  check_ntfs($fh, $nBase);
+  
+  print "Primary boot sector: \n\n";
+  
+  my @aRes = get_boot_info($fh, $nBase);
+  
+  show_boot_info(@aRes);
+  
+  my $negOffset;
+  if ($aRes[0] == 512 || $aRes[0] == 4096)
+  {
+    $negOffset = -$aRes[0];
+  }
+  else
+  {
+    printf "\nWrong sector size in first boot sector %d\n", $aRes[0];
+    exit 17;
+  }
+    
+  seek($fh, $negOffset, 2) or die "Seeking: $!";
+  $nBase = tell($fh);
+  
+  print "\nBackup boot sector: \n\n";
+  
+  @aRes = get_boot_info($fh, $nBase);
+  show_boot_info(@aRes);
+
+  close $fh;
+}
+
+sub check_ntfs
+{
+  my $fh = shift;
+  my $nBase = shift;
+  
+  my $sLabel = join("", getField($fh, $nBase, 0x03, 8, 'aaaaaaaa'));
+  
+  if ($sLabel != 'NTFS    ')
+  {
+    print "This sector is not on NTFS!\n";
+    exit 16;
+  }
+}
+
+sub get_boot_info
+{
+  my $fh = shift;
+  my $nBase = shift;
+  
+  @aRet = ();
+  
+  foreach my $Rec (@aRec)
+  {
+    #print Dumper($Rec);
+    #my @tmp = ($$Rec[0], getField($fh, $nBase, $$Rec[1], $$Rec[2], $$Rec[3]));
+    #push @aRet, \@tmp; #($$Rec[0], getField($fh, $nBase, $$Rec[1], $$Rec[2], $$Rec[3]));
+    # ($fh, $nBase, $nOffset, $nSize, $sFormat) = @_;
+    push @aRet, getField($fh, $nBase, $$Rec[1], $$Rec[2], $$Rec[3]);
+  }
+  return @aRet;
+}
+
+sub show_boot_info
+{
+  @aRes = @_;
+  #print Dumper(@aRes);
+  
+  #print '--------------------';
+  my $i = 0;
+  foreach (@aRes)
+  {
+    #print Dumper($Rec);
+    #printf $$aRec[$i][0], @_;
+    my @aTemp = @{ $aRec[$i] };
+    printf $aTemp[0], $_;
+    $i++;
+  }
+}
+
+sub update_boot_info
+{
+  my ($fh, $nBase, @newRec) = @_;
+  
+  # print Dumper(@newRec);
+ 
+  my $sBuffer = '';
+
+  @FIELDS = pack($sFormat, $sBuffer);
+
+  my $i = 0;
+  foreach (@newRec)
+  {
+    #print Dumper($Rec);
+    #printf $$aRec[$i][0], @_;
+    my @aTemp = @{ $aRec[$i] };
+    #print $aTemp[3], $_, "\n";
+    
+    my $nOffset = $aTemp[1];
+    seek($fh, $nBase + $nOffset, 0) or die "Seeking: $!";
+    
+    print $fh pack($aTemp[3], $_);
+
+    # print ($nBase + $nOffset, $aTemp[3], $_, "\n");
+
+    $i++;
+  }
+}
+
+sub check_mounted
+{
+  my $sPartition = shift;
+  
+  my $cmd = "cat /proc/mounts | grep $sPartition > /dev/null";
+
+  my $exit_code=system($cmd);
+
+  if($exit_code==0)
+  {
+    print "Error: please unmount your NTFS partition!\n";
+    exit 1;
+  }
+}
+
+sub command_fix
+{
+  my $sPartition = shift;
+  my $fh;
+  my $nBase = 0;
+  
+  check_mounted($sPartition);
+  
+  if (!open($fh, '+<', $sPartition))
+  { 
+    print "Could not open partition '$sPartition' $!\n";
+    exit 15;
+  }
+  
+  #binmode($fh);
+  
+  check_ntfs($fh, $nBase);
+  
+  print "\n";
+  
+  my @aRes = get_boot_info($fh, $nBase);
+  show_boot_info(@aRes);
+  
+  if ($aRes[0] != 512)
+  {
+    print "Partition already have $aRes[0] sector!\n";
+    exit 16;
+  }
+  
+  my @newRec = @aRes;
+  $newRec[0] = 4096;
+  $newRec[1] = 1;
+  $newRec[4] = int($aRes[4]/8);
+  $newRec[5] = int($aRes[5]/8);
+  
+  # print Dumper(@newRec);
+
+  
+  update_boot_info($fh, $nBase, @newRec);
+  
+  print "\nPrimary boot sector: \n\n";
+  
+  @aRes = get_boot_info($fh, $nBase);
+  show_boot_info(@aRes);
+  
+  seek($fh, -4096, 2) or die "Seeking: $!";
+  $nBase = tell($fh);
+  
+  update_boot_info($fh, $nBase, @newRec);
+  
+  print "\nBackup boot sector: \n\n";
+
+  @aRes = get_boot_info($fh, $nBase);
+  show_boot_info(@aRes);
+
+  close $fh;
+}
+
+sub command_unfix
+{
+  my $sPartition = shift;
+  my $fh;
+  my $nBase = 0;
+  
+  check_mounted($sPartition);
+  
+  if (!open($fh, '+<', $sPartition))
+  { 
+    print "Could not open partition '$sPartition' $!\n";
+    exit 15;
+  }
+  
+  #binmode($fh);
+  
+  check_ntfs($fh, $nBase);
+  
+  @aRes = get_boot_info($fh, $nBase);
+  show_boot_info(@aRes);
+  
+  print "\n";
+  
+  my @aRes = get_boot_info($fh, $nBase);
+  
+  if ($aRes[0] != 4096)
+  {
+    print "Partition already have $aRes[0] sector!\n";
+    exit 16;
+  }
+  
+  my @newRec = @aRes;
+  $newRec[0] = 512;
+  $newRec[1] = 8;
+  $newRec[4] = $aRes[4] * 8;
+  $newRec[5] = $aRes[5] * 8;
+  
+  #print Dumper(@newRec);
+  
+  update_boot_info($fh, $nBase, @newRec);
+  
+  print "Primary boot sector: \n\n";
+  
+  @aRes = get_boot_info($fh, $nBase);
+  show_boot_info(@aRes);
+  
+  seek($fh, -512, 2) or die "Seeking: $!";
+  $nBase = tell($fh);
+  
+  update_boot_info($fh, $nBase, @newRec);
+  
+  print "\nBackup boot sector: \n\n";
+  
+  @aRes = get_boot_info($fh, $nBase);
+  show_boot_info(@aRes);
+
+  close $fh;
+}
+
+exit 1;
