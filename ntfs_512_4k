@@ -69,8 +69,8 @@ if ($option{'help'})
 {
   print "This script correct NTFS filesystem boot sectors after migration from 512 sector to 4K (4096 bytes) sector.\n\n";
   print_usage();
-  print "NOTE: You need root privilegies and installed nilfs2 utilities.\n\n";
-  print "*** If you need additional features, you can contact me and sponsor them. PayPal: ntfs21\@kamenev.ru ***\n";
+  print "NOTE: You need root privilegies.\n\n";
+  print "*** If you need additional features, you can contact me and sponsor them. Email: ntfs21\@kamenev.ru ***\n";
   exit 0;
 }
 
