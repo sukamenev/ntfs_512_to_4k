@@ -1,4 +1,4 @@
-# Программа для коррекции загрузочного и бакап сектора NTFS после клонирования с диска с 512 сектором на 4К.
+# A program for correcting the boot and backup sectors of NTFS after cloning from a disk with a 512 sector to 4K.
 
 ## Install
 
@@ -6,16 +6,16 @@
 
 ## Examples
 
-Примеры использования:
+Examples of using:
 
-Показать информацию из загрузочного сектора NTFS и его копии.
+Show information from the NTFS boot sector and its copy.
 
- `./ntfs_512_to_4k show /dev/nvme0n1p5`
+  `./ntfs_512_to_4k show /dev/nvme0n1p5`
 
-Переделать информацию в загрузочных секторах NTFS из 512 в 4К-секторы (после клонирования)
+Convert information in NTFS boot sectors from 512 to 4K sectors (after cloning)
 
 `./ntfs_512_to_4k fix /dev/nvme0n1p5`
 
-Откатить изменения в загрузочных секторах с 4К на 512B-сектора
+Revert changes in boot sectors from 4K to 512B sectors
 
 `./ntfs_512_to_4k unfix /dev/nvme0n1p5`
